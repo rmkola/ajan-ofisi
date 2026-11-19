@@ -2385,14 +2385,50 @@ async function sekmeAc(ad) {
 const YETKI_ADLARI = [['okuma', 'Yalnız okuyabilir'], ['yazma', 'Dosya yazabilir'], ['komut', 'Komut çalıştırabilir'], ['web', 'Web’e bakabilir']];
 const YETKI_ARACLARI = { okuma:['Read', 'Glob', 'Grep'], yazma:['Write', 'Edit'], komut:['Bash'], web:['WebSearch', 'WebFetch'] };
 const TEMA_SECENEK = ['yazi', 'kod', 'tasarim', 'sosyal', 'arastirma', 'gun-sonu', 'atolye', 'bakim', 'posta', 'veri'];
+const CACHE_TTL = 5 * 60 * 1000; // 5 dakika
+function cacheOku(anahtar) { try { const item = JSON.parse(localStorage.getItem(anahtar) || 'null'); if (item && Date.now() - item.ts < CACHE_TTL) return item.data; } catch {} return null; }
+function cacheYaz(anahtar, veri) { try { localStorage.setItem(anahtar, JSON.stringify({ data:veri, ts:Date.now() })); } catch {} }
 function sonraBildir(metin) { try { sessionStorage.setItem('ofis-bildirim', metin); } catch { /* yoksa sessiz */ } location.reload(); }
 async function ajanlarSayfasi() {
   if (DEMO) return [el('h2', null, 'Ajanlar'), el('p', 'alt', 'Demo modunda ajan düzenleme kapalı.')];
-  let v;
+  
+  // Önce cache'den göster, arka planda güncelle
+  const cached = cacheOku('ajanlar-cache');
+  const ocCached = cacheOku('opencode-models-cache');
+  let v = cached;
+  let ocModeller = ocCached || [];
+  
+  const render = (data, models) => {
+    const odaAdi = id => (data.odalar.find(o => o.id === id)?.ad) || TEMALAR[id]?.ad || odaAdTuret(id);
+    // ... render logic (moved below)
+    return buildAjanlarUI(data, models, odaAdi);
+  };
+  
+  if (v) {
+    // Cache hit: hemen göster, arka planda yenile
+    const ui = render(v, ocModeller);
+    // Arka plan güncelleme
+    (async () => {
+      try {
+        const fresh = await getJSON('/api/ajanlar');
+        if (fresh) { cacheYaz('ajanlar-cache', fresh); }
+        const freshOc = await getJSON('/api/opencode');
+        if (freshOc?.modeller) { cacheYaz('opencode-models-cache', freshOc.modeller); }
+      } catch {}
+    })();
+    return ui;
+  }
+  
+  // Cache miss: normal yükle
   try { v = await getJSON('/api/ajanlar'); } catch { return [el('h2', null, 'Ajanlar'), el('p', 'alt', 'Ajan listesi alınamadı.')]; }
-  const odaAdi = id => (v.odalar.find(o => o.id === id)?.ad) || TEMALAR[id]?.ad || odaAdTuret(id);
-  let ocModeller = [];
   if (!DEMO) { try { ocModeller = ((await getJSON('/api/opencode'))?.modeller) || []; } catch { ocModeller = []; } }
+  cacheYaz('ajanlar-cache', v);
+  cacheYaz('opencode-models-cache', ocModeller);
+  return render(v, ocModeller);
+}
+
+function buildAjanlarUI(data, models, odaAdi) {
+  const ocModeller = models || [];
   // hızlı sağlayıcı/model değiştirme: Claude (sonnet/haiku/opus) ya da önbellekteki opencode modelleri
   const modelCubugu = a => {
     const sar = el('div', 'hizli-model');
@@ -2421,16 +2457,16 @@ async function ajanlarSayfasi() {
     return sar;
   };
   const arac = el('div', 'arac-cubugu');
-  const ekle = el('button', 'koyu', '+ Ajan ekle'); ekle.onclick = () => { SES.tik(); ajanFormu(null, v); };
+  const ekle = el('button', 'koyu', '+ Ajan ekle'); ekle.onclick = () => { SES.tik(); ajanFormu(null, data); };
   const sablon = el('button', 'dugme', 'Şablondan ekle'); sablon.onclick = () => { SES.tik(); sablonSecici(); };
   arac.append(ekle, sablon);
   if (!DEMO && !ocModeller.length) arac.append(el('span', 'ipucu', 'Opencode modelleri için üstteki Opencode panelinden "Modelleri yenile".'));
   const iz = el('div', 'izgara');
-  v.ajanlar.forEach(a => {
+  data.ajanlar.forEach(a => {
     const k = el('div', 'kart');
     const islem = el('div', 'islemler');
     const duz = el('button', null, 'Düzenle');
-    duz.onclick = async () => { SES.tik(); try { ajanFormu(await getJSON('/api/ajanlar/' + encodeURIComponent(a.id)), v); } catch { tost('Ajan bilgisi alınamadı.'); } };
+    duz.onclick = async () => { SES.tik(); try { ajanFormu(await getJSON('/api/ajanlar/' + encodeURIComponent(a.id)), data); } catch { tost('Ajan bilgisi alınamadı.'); } };
     islem.append(duz);
     if (a.id !== 'ceo') {
       const sil = el('button', 'sil', 'Sil');
@@ -2448,9 +2484,44 @@ async function ajanlarSayfasi() {
     k.append(baslik, el('div', 'oda-adi', odaAdi(a.oda || 'genel')), el('p', null, a.aciklama || ''), modelCubugu(a), islem);
     iz.append(k);
   });
-  return [el('h2', null, 'Ajanlar'), el('p', 'alt', `${v.ajanlar.length} ajan. Ekle, düzenle ya da sektör şablonundan hazır ajanlar al. Değişiklik hemen ofise yansır.`), arac, iz,
-    el('h2', 'ara-baslik', 'Odalar'), el('p', 'alt', 'Odanın adını, açıklamasını ve görünümünü değiştir. Ajanı kalmayan oda sahnede görünmez.'), odalarDuzenle(v)];
+  return [el('h2', null, 'Ajanlar'), el('p', 'alt', `${data.ajanlar.length} ajan. Ekle, düzenle ya da sektör şablonundan hazır ajanlar al. Değişiklik hemen ofise yansır.`), arac, iz,
+    el('h2', 'ara-baslik', 'Odalar'), el('p', 'alt', 'Odanın adını, açıklamasını ve görünümünü değiştir. Ajanı kalmayan oda sahnede görünmez.'), odalarDuzenle(data)];
 }
+
+function buildAjanlarUI(data, models, odaAdi) {
+  let ocModeller = models || [];
+  const arac = el('div', 'arac-cubugu');
+  const ekle = el('button', 'koyu', '+ Ajan ekle'); ekle.onclick = () => { SES.tik(); ajanFormu(null, data); };
+  const sablon = el('button', 'dugme', 'Şablondan ekle'); sablon.onclick = () => { SES.tik(); sablonSecici(); };
+  arac.append(ekle, sablon);
+  if (!DEMO && !ocModeller.length) arac.append(el('span', 'ipucu', 'Opencode modelleri için üstteki Opencode panelinden "Modelleri yenile".'));
+  const iz = el('div', 'izgara');
+  data.ajanlar.forEach(a => {
+    const k = el('div', 'kart');
+    const islem = el('div', 'islemler');
+    const duz = el('button', null, 'Düzenle');
+    duz.onclick = async () => { SES.tik(); try { ajanFormu(await getJSON('/api/ajanlar/' + encodeURIComponent(a.id)), data); } catch { tost('Ajan bilgisi alınamadı.'); } };
+    islem.append(duz);
+    if (a.id !== 'ceo') {
+      const sil = el('button', 'sil', 'Sil');
+      sil.onclick = async () => {
+        if (!confirm(`${a.ad} ofisten çıkarılsın mı? Hafızası ve çıktıları diskte kalır.`)) return;
+        const { durum, veri } = await postJSON('/api/ajanlar', { islem:'sil', id:a.id });
+        if (durum === 200) return sonraBildir(a.ad + ' ofisten çıkarıldı.');
+        tost(durum === 409 ? 'Ajan şu an çalışıyor; bitince tekrar dene.' : (veri.hata || 'Silinemedi.'));
+      };
+      islem.append(sil);
+    }
+    const baslik = el('h4', null, a.ad);
+    const sagAd = (a.saglayici || 'claude');
+    baslik.append(el('span', 'hizli-rozet' + (sagAd === 'opencode' ? ' oc' : ''), sagAd === 'opencode' ? 'OC' : 'CL'));
+    k.append(baslik, el('div', 'oda-adi', odaAdi(a.oda || 'genel')), el('p', null, a.aciklama || ''), modelCubugu(a), islem);
+    iz.append(k);
+  });
+  return [el('h2', null, 'Ajanlar'), el('p', 'alt', `${data.ajanlar.length} ajan. Ekle, düzenle ya da sektör şablonundan hazır ajanlar al. Değişiklik hemen ofise yansır.`), arac, iz,
+    el('h2', 'ara-baslik', 'Odalar'), el('p', 'alt', 'Odanın adını, açıklamasını ve görünümünü değiştir. Ajanı kalmayan oda sahnede görünmez.'), odalarDuzenle(data)];
+}
+
 function odaListesi(v) { // ayarlı odalar + yalnız ajanlarda geçenler (ilk kayıt geçerli), CEO hariç
   const harita = new Map();
   v.odalar.forEach(o => { if (o?.id && !harita.has(o.id)) harita.set(o.id, o); });
