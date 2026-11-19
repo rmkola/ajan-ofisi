@@ -2386,28 +2386,45 @@ const YETKI_ADLARI = [['okuma', 'Yalnız okuyabilir'], ['yazma', 'Dosya yazabili
 const YETKI_ARACLARI = { okuma:['Read', 'Glob', 'Grep'], yazma:['Write', 'Edit'], komut:['Bash'], web:['WebSearch', 'WebFetch'] };
 const TEMA_SECENEK = ['yazi', 'kod', 'tasarim', 'sosyal', 'arastirma', 'gun-sonu', 'atolye', 'bakim', 'posta', 'veri'];
 const CACHE_TTL = 5 * 60 * 1000; // 5 dakika
-function cacheOku(anahtar) { try { const item = JSON.parse(localStorage.getItem(anahtar) || 'null'); if (item && Date.now() - item.ts < CACHE_TTL) return item.data; } catch {} return null; }
+async function cacheOku(anahtar) {
+  // 1. localStorage dene
+  try {
+    const item = JSON.parse(localStorage.getItem(anahtar) || 'null');
+    if (item && Date.now() - item.ts < CACHE_TTL) return item.data;
+  } catch {}
+  // 2. Sunucu cache dene
+  try {
+    const sunucuAnahtar = anahtar === 'ajanlar-cache' ? 'ajanlar' : 'opencode-modeller';
+    const res = await getJSON('/api/cache/' + sunucuAnahtar);
+    if (res?.data) {
+      // localStorage'a da yaz
+      cacheYaz(anahtar, res.data);
+      return res.data;
+    }
+  } catch {}
+  return null;
+}
 function cacheYaz(anahtar, veri) { try { localStorage.setItem(anahtar, JSON.stringify({ data:veri, ts:Date.now() })); } catch {} }
 function sonraBildir(metin) { try { sessionStorage.setItem('ofis-bildirim', metin); } catch { /* yoksa sessiz */ } location.reload(); }
 async function ajanlarSayfasi() {
   if (DEMO) return [el('h2', null, 'Ajanlar'), el('p', 'alt', 'Demo modunda ajan düzenleme kapalı.')];
   
-  // Önce cache'den göster, arka planda güncelle
-  const cached = cacheOku('ajanlar-cache');
-  const ocCached = cacheOku('opencode-models-cache');
+  // Önce cache'den göster (localStorage + sunucu cache), arka planda güncelle
+  const [cached, ocCached] = await Promise.all([
+    cacheOku('ajanlar-cache'),
+    cacheOku('opencode-models-cache')
+  ]);
   let v = cached;
   let ocModeller = ocCached || [];
   
   const render = (data, models) => {
     const odaAdi = id => (data.odalar.find(o => o.id === id)?.ad) || TEMALAR[id]?.ad || odaAdTuret(id);
-    // ... render logic (moved below)
     return buildAjanlarUI(data, models, odaAdi);
   };
   
   if (v) {
     // Cache hit: hemen göster, arka planda yenile
     const ui = render(v, ocModeller);
-    // Arka plan güncelleme
     (async () => {
       try {
         const fresh = await getJSON('/api/ajanlar');

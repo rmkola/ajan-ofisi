@@ -845,6 +845,10 @@ class Isleyici(SimpleHTTPRequestHandler):
             return self._json(200, {"terminaller": KOPRU.liste()})
         if yol.path == "/api/olaylar":
             return self._sse(parse_qs(yol.query))
+        if yol.path == "/api/cache/ajanlar":
+            return self._json(200, onbellek_oku("ajanlar"))
+        if yol.path == "/api/cache/opencode-modeller":
+            return self._json(200, onbellek_oku("opencode-modeller"))
         if yol.path.startswith("/api/"):
             return self._json(404, {"hata": "yok"})
         return super().do_GET()
@@ -1068,6 +1072,43 @@ def sifre_sifirla_komutu():
     print("Şifre değişti. Tüm açık oturumlar kapatıldı.")
 
 
+def onay_verileri_onbellekle():
+    """Ajanlar ve opencode modellerini localStorage için önceden getir (sunucu tarafında TTL ile)."""
+    try:
+        import json, time, os
+        cache_dir = os.path.join(ortak.VERI, "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # ajanlar
+        from ajan_yonetimi import ajanlari_listele
+        ajanlar = ajanlari_listele()
+        with open(os.path.join(cache_dir, "ajanlar.json"), "w", encoding="utf-8") as f:
+            json.dump({"data": ajanlar, "ts": time.time() * 1000}, f)
+        
+        # opencode modeller
+        try:
+            from opencode_baglanti import modelleri_getir
+            modeller = modelleri_getir()
+            if modeller:
+                with open(os.path.join(cache_dir, "opencode-modeller.json"), "w", encoding="utf-8") as f:
+                    json.dump({"data": modeller, "ts": time.time() * 1000}, f)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[cache warm] atlandı: {e}")
+
+def onbellek_oku(anahtar):
+    """Sunucu tarafı cache dosyasını oku (ajanlar / opencode-modeller)."""
+    import json, os
+    dosya = os.path.join(ortak.VERI, "cache", f"{anahtar}.json")
+    if not os.path.exists(dosya):
+        return {"data": None, "ts": 0}
+    try:
+        with open(dosya, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"data": None, "ts": 0}
+
 def main():
     if "--sifre-sifirla" in sys.argv[1:]:
         return sifre_sifirla_komutu()
@@ -1084,6 +1125,11 @@ def main():
         ortak.ajanlari_yukle()  # eksikse en küçük yapılandırma yazılır; bozuksa hemen düş
     except (ortak.YapilandirmaHatasi, ValueError, json.JSONDecodeError) as e:
         raise SystemExit(f"Ajan Ofisi başlatılamadı: {e}")
+    
+    # Cache warming (arka planda, blocking değil)
+    import threading
+    threading.Thread(target=onay_verileri_onbellekle, daemon=True).start()
+    
     token_sayac.olaylardan_geri_kur(olaylari_oku())  # bugünkü eski koşuların usage'ı sayaçta yoksa ekle
     sunucu, port = bos_port_ile_ac()
     with open(os.path.join(ortak.VERI, "port"), "w") as f:
