@@ -964,11 +964,16 @@ def proje_islem(veri):
     islem, pid = veri.get("islem"), veri.get("id")
     try:
         if islem == "ekle":
-            return {"proje": projeler.ekle(veri.get("baslik"), veri.get("aciklama") or "", veri.get("oncelik") or "orta",
-                                           veri.get("hedef_tarih") or None)}
+            proje = projeler.ekle(veri.get("baslik"), veri.get("aciklama") or "", veri.get("oncelik") or "orta",
+                                           veri.get("hedef_tarih") or None)
+            # Yeni proje eklendiğinde acil toplantı tetikle
+            acil_sonuc = TOPLANTI.acil_toplanti(proje["id"])
+            if isinstance(acil_sonuc, dict) and acil_sonuc.get("error"):
+                ortak.olay_yaz({"tur": "toplanti_hata", "toplanti_tur": "acil", "hata": acil_sonuc["error"]})
+            return {"proje": proje, "acil_toplanti": acil_sonuc}
         if islem == "guncelle":
             return {"proje": projeler.guncelle(pid, **{k: veri[k] for k in ("baslik", "aciklama", "oncelik",
-                                                                             "hedef_tarih") if k in veri})}
+                                                                              "hedef_tarih") if k in veri})}
         if islem == "not":
             projeler.not_ekle(pid, veri.get("metin"), "kullanici")
             return {"proje": projeler.al(pid)}
@@ -988,6 +993,13 @@ def proje_islem(veri):
             return {"proje": projeler.onayla(pid) if islem == "onayla" else projeler.reddet(pid, metin)}
         if islem == "saatler":
             return {"saatler": toplanti.saatler_ayarla(veri.get("sabah"), veri.get("aksam"))}
+        if islem == "acil_toplanti":
+            if not pid:
+                raise IstekHatasi(400, "proje id gerekli")
+            acil_sonuc = TOPLANTI.acil_toplanti(pid)
+            if isinstance(acil_sonuc, dict) and acil_sonuc.get("error"):
+                ortak.olay_yaz({"tur": "toplanti_hata", "toplanti_tur": "acil", "hata": acil_sonuc["error"]})
+            return {"acil_toplanti": acil_sonuc}
     except (ValueError, TypeError) as e:
         raise IstekHatasi(400, str(e)) from e
     raise IstekHatasi(400, "bilinmeyen işlem")

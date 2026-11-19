@@ -320,6 +320,15 @@ export function createCat({ desen = 'tekir', ton = 0, yavru = false, aksesuar = 
   const istaka = new THREE.Group(); istaka.position.set(.07, .6, -.4); istaka.visible = false; kok.add(istaka);
   const sopa = mesh(istaka, GEO.kure, ORTAK.istaka, [0, 0, .7], [.016, .016, .78], false);
   mesh(istaka, GEO.kure, ORTAK.istakaUc, [0, 0, 1.47], [.017, .017, .03], false);
+  
+  // laptop (toplantı için): sağ tarafında asılı durur
+  const laptop = new THREE.Group(); laptop.position.set(.18, .35, .15); laptop.rotation.set(-.25, .3, 0); laptop.visible = false; kok.add(laptop);
+  const laptopMat = new THREE.MeshStandardMaterial({ color: '#2a2a2e', roughness: .3, metalness: .5 });
+  const laptopIcMat = new THREE.MeshStandardMaterial({ color: '#1a1a2e', roughness: .1, metalness: .1 });
+  mesh(laptop, GEO.kure, laptopMat, [0, 0, 0], [.22, .018, .16], false); // alt kısım
+  mesh(laptop, GEO.kure, laptopIcMat, [0, .01, 0], [.2, .005, .145], false); // ekran
+  mesh(laptop, GEO.kure, new THREE.MeshStandardMaterial({ color: '#3a3a4e' }), [0, .005, .13], [.2, .002, .015], false); // kamerka
+  mesh(laptop, GEO.kure, laptopMat, [0, -.008, 0], [.21, .008, .16], false); // üst kapak (kapalıyken)
   let vurduMu = false, sonFaz = 0;
   const VURUS_SN = 4.5, VURUS_AN = .78;
   function vurusOfset(f) { // nişan → geri çek → vur → bekle (istakanın ileri-geri konumu)
@@ -400,6 +409,7 @@ export function createCat({ desen = 'tekir', ton = 0, yavru = false, aksesuar = 
     }
     joypad.visible = oyun;
     istaka.visible = !meme && durum === 'bilardo';
+    laptop.visible = !meme && (durum === 'dinleniyor' || durum === 'sohbet');
     if (!uyur) { ek.k4 = { rz:Math.sin(t * 3.1) * .3 }; ek.k5 = { rz:Math.sin(t * 3.1 - .6) * .45 }; }
     const bitiyor = durum === 'bitti' && bittiT >= 0 && !meme;
     if (bitiyor || uyaniyor()) {
@@ -457,7 +467,8 @@ export function createCat({ desen = 'tekir', ton = 0, yavru = false, aksesuar = 
   update(0);
   // bilardo: vuruş anı bir kez bildirilir (top o an yola çıkar)
   const vurdu = () => { const v = vurduMu; vurduMu = false; return v; };
-  return { group, dugum, setDurum, setMeme, setPoz, setKontur, update, vurdu, get durum() { return durum; }, desen };
+  function setLaptop(goster) { laptop.visible = !!goster; }
+  return { group, dugum, setDurum, setMeme, setPoz, setKontur, update, vurdu, setLaptop, get durum() { return durum; }, desen };
 }
 
 /* ---------- takım → desen eşlemesi ---------- */

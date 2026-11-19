@@ -19,6 +19,7 @@ SURE_SN = 300
 GEC_KALMA_SN = 3 * 3600
 VARSAYILAN_SAATLER = {"sabah": "09:00", "aksam": "17:00"}
 KONU = {"sabah": "Bugün ne yapacağız?", "aksam": "Bugün ne yaptık?"}
+ACIL_KONU = "Acil toplantı: Yeni proje eklendi"
 SORU_TURLERI = ("maliyet", "buyuk-degisiklik", "yayin-mail-para", "diger")
 TUTANAK_MAKS, ESLESME_MAKS, SORU_MAKS, MAKS_ATAMA = 30, 200, 5, 5
 OZET_MAKS, SORU_METIN_MAKS, NEDEN_MAKS = 1500, 1000, 300
@@ -221,7 +222,7 @@ def toplanti_dogrula(tur, veri, tablo, projeler_listesi):
             ilerleme.append({"proje_id": i["proje_id"], "yuzde": max(0, min(100, int(i["yuzde"])))})
 
     atamalar, reddedilen = [], []
-    if tur == "sabah":
+    if tur in ("sabah", "acil"):
         for a in _liste(veri, "atamalar"):
             ajan_id, prompt, pid = _str(a.get("ajan")), _str(a.get("prompt")), _str(a.get("proje_id"))
             ajan = tablo.get(ajan_id) if ajan_id else None
@@ -428,6 +429,47 @@ class Toplanti:
             else:
                 satirlar.append(f"✗ {x['ajan']}: {sonuc}")
         ortak.olay_yaz({"tur": "toplanti_bitti", "toplanti_tur": tur})
+        
+        # Toplantı notunu ilgili projelere ekle
+        if a.get("tur") in ("sabah", "aksam"):
+            simdi = datetime.now()
+            tutanak_metni = f"**{a.get('tur').capitalize()} Toplantı Notu ({simdi.strftime('%Y-%m-%d %H:%M')})**\n\n"
+            tutanak_metni += f"Özet: {a.get('ozet', '')}\n\n"
+            if a.get("atamalar"):
+                tutanak_metni += "Atamalar:\n"
+                for atama in a["atamalar"]:
+                    tutanak_metni += f"- {atama['ajan']}: {atama['prompt'][:200]}\n"
+            if a.get("sorular"):
+                tutanak_metni += "\nSorular:\n"
+                for q in a["sorular"]:
+                    tutanak_metni += f"- ({q.get('tur', '')}) {q['soru']}\n"
+            if a.get("gorevler"):
+                tutanak_metni += "\nGörev güncellemeleri:\n"
+                for g in a["gorevler"]:
+                    tutanak_metni += f"- {g['proje_id']} [{g['durum']}] {g['baslik']} ({g['ajan'] or 'atanmadı'})\n"
+            if a.get("ilerleme"):
+                tutanak_metni += "\nİlerleme güncellemeleri:\n"
+                for i in a["ilerleme"]:
+                    tutanak_metni += f"- {i['proje_id']}: %{i['yuzde']}\n"
+            
+            # Her atanan projeye not ekle
+            proje_ids = set()
+            for atama in a.get("atamalar") or []:
+                proje_ids.add(atama.get("proje_id"))
+            for gorev in a.get("gorevler") or []:
+                proje_ids.add(gorev.get("proje_id"))
+            for ilerleme in a.get("ilerleme") or []:
+                proje_ids.add(ilerleme.get("proje_id"))
+            for soru in a.get("sorular") or []:
+                proje_ids.add(soru.get("proje_id"))
+            
+            for pid in proje_ids:
+                if pid:
+                    try:
+                        projeler.not_ekle(pid, tutanak_metni, "ceo")
+                    except ValueError:
+                        pass
+        
         if tur == "sabah":
             baslik = f"🗓 Sabah toplantısı — {KONU['sabah']}"
         else:
@@ -494,6 +536,149 @@ class Toplanti:
             sonuc = self._atama_baslat(x)
             if sonuc not in ("basladi", "kuyruk"):
                 self.bildir(f"⚠ {ajan} için bekleyen toplantı işi başlatılamadı, düşürüldü: {sonuc}", None)
+
+    def acil_toplanti(self, proje_id):
+        """Yeni proje eklendiğinde acil toplantı tetikler."""
+        _, tablo = ortak.ajanlari_yukle()
+        proje = projeler.al(proje_id)
+        if not proje:
+            return {"error": "Proje bulunamadı"}
+        
+        d = durum()
+        simdi = datetime.now().astimezone()
+        gun = simdi.date().isoformat()
+        
+        # Acil toplantı için özel prompt
+        prompt = (
+            f"ACİL TOPLANTI: Yeni proje eklendi!\n\n"
+            f"Proje: {proje.get('baslik')}\n"
+            f"ID: {proje_id}\n"
+            f"Açıklama: {proje.get('aciklama') or '-'}\n"
+            f"Öncelik: {proje.get('oncelik') or 'orta'}\n"
+            f"Hedef tarih: {proje.get('hedef_tarih') or '-'}\n\n"
+            "Sen Ajan Ofisi'nin CEO'susun. CLAUDE.md anayasandır; 'Karar yetkisi' bölümüne uy.\n"
+            "Bu yeni projeyi analiz et ve hemen çalışmaya başlayacak görevleri dağıt.\n"
+            "Her ajana en fazla 1 iş ver. Prompt ajanın tek başına uygulayabileceği net bir görev olsun.\n"
+            "Kural: yayın, mail gönderme, para hiçbir ajana verilmez. Maliyete dokunan, büyük değişiklik ya da "
+            "yeni entegrasyon gerektiren işi atama; kullanıcıya sor (sorular).\n\n"
+            "MECİDİ: Tüm atanan ajanları (atamalar.dizisindeki ajanları) AYNI ZAMANDA katilimcilar dizisine de ekle. "
+            "Toplantıya katılanlar = CEO + atanan ajanlar.\n\n"
+            "Cevabı yalnız şemaya uyan JSON olarak ver: ozet, katilimcilar, gorevler, atamalar, sorular."
+        )
+        
+        try:
+            ortak.olay_yaz({"tur": "acil_toplanti_basladi", "proje_id": proje_id, "proje_baslik": proje.get('baslik')})
+            ceo_yanit = self.ceo_json(prompt, f"{simdi:%Y-%m-%d-%H%M%S}-toplanti-acil-{proje_id}")
+            ortak.olay_yaz({"tur": "acil_toplanti_ceo_yanit", "proje_id": proje_id, "yanit": str(ceo_yanit)[:1000]})
+            print(f"[DEBUG] CEO acil_toplanti response: {ceo_yanit}")
+            s = toplanti_dogrula("acil", ceo_yanit, tablo, projeler.liste())
+            print(f"[DEBUG] toplanti_dogrula result katilimcilar: {s.get('katilimcilar')}, atamalar: {[(a['ajan'], a['prompt'][:40]) for a in s.get('atamalar', [])]}")
+            
+            # Fallback: CEO atama yapmadıysa, projeye uygun 2-3 ajan otomatik ata
+            if not s.get("atamalar"):
+                proje_fb = projeler.al(proje_id)
+                aciklama = (proje_fb.get("aciklama") or "").lower() if proje_fb else ""
+                atanacak = []
+                # Basit kural tabanlı atama
+                if any(k in aciklama for k in ["web", "site", "frontend", "ui", "tasarim", "design"]):
+                    atanacak.extend(["frontend-gelistirici", "ui-ux-tasarimci"])
+                if any(k in aciklama for k in ["api", "backend", "veritabani", "database", "sunucu"]):
+                    atanacak.extend(["backend-gelistirici", "veritabani-uzmani"])
+                if any(k in aciklama for k in ["test", "qa", "kalite"]):
+                    atanacak.append("qa-muhendisi")
+                if any(k in aciklama for k in ["deploy", "ci/cd", "docker", "sunucu", "server"]):
+                    atanacak.append("devops-muhendisi")
+                if any(k in aciklama for k in ["guvenlik", "security", "sızma"]):
+                    atanacak.append("guvenlik-uzmani")
+                if any(k in aciklama for k in ["arastir", "analiz", "veri", "data"]):
+                    atanacak.append("arastirmaci")
+                if any(k in aciklama for k in ["dokuman", "doc", "readme", "wiki"]):
+                    atanacak.append("dokumantasyon-uzmani")
+                
+                # En az cto ve urun-yoneticisi'ni ekle
+                for a in ["cto", "urun-yoneticisi"]:
+                    if a in tablo and a not in atanacak:
+                        atanacak.append(a)
+                
+                # Maksimum 5 ajan, kurulu olanları filtrele
+                atanacak = [a for a in atanacak if a in tablo and tablo[a].get("kurulu")][:5]
+                
+                if atanacak:
+                    for ajan_id in atanacak:
+                        s["atamalar"].append({
+                            "ajan": ajan_id,
+                            "prompt": f"Yeni proje '{proje.get('baslik')}' için başlangıç analizi ve plan yap. Proje: {proje.get('aciklama') or '-'}",
+                            "proje_id": proje_id,
+                            "gorev_id": None
+                        })
+                    # katilimcilar'ı güncelle
+                    for a in atanacak:
+                        if a not in s["katilimcilar"]:
+                            s["katilimcilar"].append(a)
+                    print(f"[DEBUG] Fallback atamalar eklendi: {atanacak}")
+        
+        except Exception as e:
+            hata = f"Acil toplantı yapılamadı: {str(e)[:200]}"
+            ortak.olay_yaz({"tur": "toplanti_hata", "toplanti_tur": "acil", "hata": hata, "proje_id": proje_id})
+            return {"error": hata}
+        
+        # Görevleri yaz
+        for g in s["gorevler"]:
+            try:
+                projeler.gorev_yaz(g["proje_id"], g["gorev_id"], g["baslik"], g["ajan"], g["durum"])
+            except ValueError:
+                pass
+        
+        # Toplantı aktif et
+        aktif = {"tur": "acil", "konu": ACIL_KONU, "baslangic": simdi.isoformat(timespec="seconds"),
+                 "bitis": (simdi + timedelta(seconds=SURE_SN)).isoformat(timespec="seconds"),
+                 **{k: s[k] for k in ("katilimcilar", "ozet", "atamalar", "sorular", "bitti_mi", "reddedilen")}}
+        degistir(lambda d: d.update(aktif=aktif))
+        
+        ortak.olay_yaz({"tur": "toplanti_basladi", "toplanti_tur": "acil", "konu": ACIL_KONU,
+                        "katilimcilar": aktif["katilimcilar"], "ozet": aktif["ozet"], "bitis": aktif["bitis"],
+                        "proje_id": proje_id})
+        
+        # Atamaları başlat
+        for x in s.get("atamalar") or []:
+            etiket = self._gorev_basligi(x) or (x.get("prompt") or "")[:60]
+            sonuc = self._atama_baslat(x)
+            if sonuc == "basladi":
+                self.bildir(f"▶ {x['ajan']}: {etiket}", None)
+            elif sonuc == "kuyruk":
+                self.bildir(f"⏳ {x['ajan']}: {etiket} (meşgul; boşalınca başlayacak)", None)
+            else:
+                self.bildir(f"✗ {x['ajan']}: {sonuc}", None)
+        
+        # Soruları gönder
+        zaman = datetime.now().strftime("%Y%m%d%H%M%S")
+        for i, q in enumerate(s.get("sorular") or []):
+            p = projeler.al(q.get("proje_id"))
+            if not p or p.get("durum") != "acik":
+                continue
+            metin = (f"❓ CEO soruyor ({p.get('baslik')}): {q['soru']}\nCevap için bu mesajı Yanıtla. "
+                     "1 saat içinde cevap gelmezse güvenli tarafta karar verilir.")
+            self._soru_gonder(f"toplanti-{zaman}-{i}", q["soru"], q.get("tur") or "eksik", metin,
+                              kaynak="toplanti", proje_id=p["id"])
+        
+        # Toplantı notunu projeye ekle
+        tutanak_metni = f"**Acil Toplantı Notu ({simdi.strftime('%Y-%m-%d %H:%M')})**\n\n"
+        tutanak_metni += f"Özet: {s.get('ozet', '')}\n\n"
+        if s.get("atamalar"):
+            tutanak_metni += "Atamalar:\n"
+            for a in s["atamalar"]:
+                tutanak_metni += f"- {a['ajan']}: {a['prompt'][:200]}\n"
+        if s.get("sorular"):
+            tutanak_metni += "\nSorular:\n"
+            for q in s["sorular"]:
+                tutanak_metni += f"- ({q.get('tur', '')}) {q['soru']}\n"
+        
+        try:
+            projeler.not_ekle(proje_id, tutanak_metni, "ceo")
+        except ValueError:
+            pass
+        
+        return {"tutanak": tutanak_metni, "atamalar": s.get("atamalar", []), "sorular": s.get("sorular", [])}
 
     def _hatirlat(self, simdi):
         d = durum()

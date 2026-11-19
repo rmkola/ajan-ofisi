@@ -1478,13 +1478,30 @@ function atamaGuncelle(t) {
   zeminCiz(EGLENCE);
 }
 function kediHedefi(a) {
-  if (a.durum !== 'uyku' || a.memeAktif) return a.masaYeri;           // iş var (ya da meme): masaya
+  // ÖNCE toplantı kontrolü: aktif toplantıdaysa masaya değil, toplantıya git
   const tp = TOPLANTI_DURUM.aktif;                                     // toplantı gece/eğlence kuralından önce gelir
-  if (toplantidaMi(tp, Date.now()) && (tp.katilimcilar || []).includes(a.id) && TOPLANTI.yerler.has(a.id)) {
+  const meetingActive = toplantidaMi(tp, Date.now());
+  const hasSeat = TOPLANTI.yerler.has(a.id);
+  
+  // Acil toplantıda TÜM kediler toplantıya gider
+  // Düzenli toplantılarda (sabah/aksam) yalnız katilimcilar
+  const isEmergency = meetingActive && tp?.tur === 'acil';
+  const isParticipant = meetingActive && (tp.katilimcilar || []).includes(a.id);
+  const shouldGoToMeeting = hasSeat && (isEmergency || isParticipant);
+  
+  if (shouldGoToMeeting) {
     const y = TOPLANTI.yerler.get(a.id);
+    const isCEO = a.id === 'ceo';
     return a.toplantiYeri ||= { anahtar:'tp:' + a.id, pos:new THREE.Vector3(TOPLANTI.cx + y.x, y.y, TOPLANTI.cz + y.z), ry:y.ry,
-      durum:a.id === 'ceo' ? 'sohbet' : 'dinleniyor' };
+      durum: isCEO ? 'sohbet' : 'dinleniyor' };
   }
+  
+  // Debug: log why cat is not going to meeting
+  if (meetingActive && ((tp.katilimcilar || []).includes(a.id))) {
+    console.log('[DEBUG] kediHedefi - cat', a.id, 'is participant but not going to meeting:', { meetingActive, isParticipant, hasSeat, tpKatilimcilar: tp.katilimcilar });
+  }
+  
+  if (a.durum !== 'uyku' || a.memeAktif) return a.masaYeri;           // iş var (ya da meme): masaya
   if (gece) return a.yatakYeri || a.masaYeri;
   const i = atama.get(a.id), y = EGLENCE.yerler[i];
   if (y === undefined) return a.masaYeri;
@@ -1873,6 +1890,7 @@ function olayIsle(o) {
     },
     toplanti_basladi() {
       if (tekrar) return; // sayfa açılırken eski olay: güncel durum /api/projeler'den gelir
+      console.log('[DEBUG] toplanti_basladi event received:', { konu: o.konu, katilimcilar: o.katilimcilar, bitis: o.bitis });
       TOPLANTI_DURUM.aktif = { konu:o.konu, katilimcilar:o.katilimcilar || [], ozet:o.ozet || '', bitis:o.bitis };
       if (Array.isArray(o.projeler)) TOPLANTI_DURUM.projeler = o.projeler;
       akisEkle('ceo', 'Toplantı başladı: ' + (o.konu || ''), '', '', zaman);
@@ -2036,10 +2054,11 @@ async function sayacYukle() {
 }
 function canliBaglan() {
   modGoster('canli', 'Canlı');
+  console.log('[DEBUG] Connecting to SSE /api/olaylar');
   const kaynak = new EventSource('/api/olaylar?son=30');
   TURLER.forEach(t => kaynak.addEventListener(t, e => { try { olayIsle(JSON.parse(e.data)); } catch { /* bozuk satır atlanır */ } }));
-  kaynak.onopen = () => modGoster('canli', 'Canlı');
-  kaynak.onerror = () => modGoster('kopuk', 'Canlı · yeniden bağlanıyor');
+  kaynak.onopen = () => { console.log('[DEBUG] SSE connection opened'); modGoster('canli', 'Canlı'); };
+  kaynak.onerror = (err) => { console.log('[DEBUG] SSE error:', err); modGoster('kopuk', 'Canlı · yeniden bağlanıyor'); };
 }
 function ilkDurum() {
   apiAjanlar.forEach(x => {
@@ -2711,6 +2730,26 @@ function projeFormu() {
 function projeKarti(p) {
   const k = el('div', 'kart proje-kart');
   const ust = el('div', 'ust'); ust.append(el('span', 'durum-rozet ' + p.durum, PROJE_DURUM_ADI[p.durum] || p.durum), document.createTextNode(' öncelik ' + (ONCELIK_ADI[p.oncelik] || p.oncelik) + (p.hedef_tarih ? ' · hedef ' + p.hedef_tarih : '')));
+  
+  // Acil toplantı butonu (açık projeler için)
+  if (p.durum === 'acik') {
+    const acilBtn = el('button', 'dugme', '⚡ Acil Toplantı');
+    acilBtn.style.marginLeft = '8px';
+    acilBtn.onclick = async () => {
+      SES.tik();
+      acilBtn.disabled = true; acilBtn.textContent = 'Yapılıyor...';
+      const { durum, veri } = await postJSON('/api/projeler', { islem:'acil_toplanti', id:p.id });
+      acilBtn.disabled = false; acilBtn.textContent = '⚡ Acil Toplantı';
+      if (durum === 200) {
+        tost('Acil toplantı başlatıldı — kediler toplantı odasına gidiyor (5 dk).');
+        sekmeAc('ofis'); // ofis sekmesine geç ki kediler toplantıya giderken izleyebilesin
+      } else {
+        tost(veri.hata || 'Toplantı yapılamadı.');
+      }
+    };
+    ust.append(acilBtn);
+  }
+  
   const bar = el('div', 'ilerleme'); const dol = el('i'); dol.style.width = Math.max(0, Math.min(100, Number(p.ilerleme) || 0)) + '%'; bar.append(dol);
   k.append(ust, el('h4', null, p.baslik), bar, el('div', 'oda-adi', '%' + (p.ilerleme || 0) + ' tamam'));
   if (p.aciklama) k.append(el('p', null, p.aciklama));
@@ -2719,26 +2758,80 @@ function projeKarti(p) {
   if (!(p.gorevler || []).length && p.durum !== 'kapali') gorevler.append(el('div', null, 'Görevleri CEO sıradaki sabah toplantısında çıkaracak.'));
   k.append(gorevler);
   const notlar = el('div', 'notlar');
-  (p.notlar || []).slice(-3).forEach(n => notlar.append(el('div', null, (n.kaynak === 'ceo' ? 'CEO: ' : 'Sen: ') + n.metin)));
+  (p.notlar || []).slice(-5).forEach(n => {
+    const satir = el('div', 'not-satir');
+    satir.style.cursor = 'pointer';
+    satir.style.padding = '4px 0';
+    satir.style.borderBottom = '1px solid rgba(59,52,44,.06)';
+    satir.innerHTML = (n.kaynak === 'ceo' ? '<b>CEO: </b>' : '<b>Sen: </b>') + n.metin.replace(/</g, '<').replace(/>/g, '>');
+    satir.title = 'Detay için tıkla';
+    satir.onclick = () => notPopup(n);
+    notlar.append(satir);
+  });
   k.append(notlar);
   if (p.durum === 'kapali') return k;
   const metin = el('textarea'); metin.maxLength = 1000;
   const islem = el('div', 'islemler');
   if (p.durum === 'onay_bekliyor') {
-    metin.placeholder = 'Eksik bir şey varsa yaz, “Hayır, devam”a bas.';
+    metin.placeholder = 'Eksik bir şey varsa yaz, "Hayır, devam"a bas.';
     const evet = el('button', null, 'Evet, bitti'); evet.onclick = () => { SES.tik(); projeIslem({ islem:'onayla', id:p.id }); };
     const hayir = el('button', null, 'Hayır, devam'); hayir.onclick = () => { SES.tik(); projeIslem({ islem:'reddet', id:p.id, metin:metin.value.trim() || 'Henüz bitmedi.' }); };
     islem.append(evet, hayir);
   } else {
-    metin.placeholder = 'CEO’ya not: yön, tercih, öncelik…';
+    metin.placeholder = 'CEO\'ya not: yön, tercih, öncelik…';
     const not = el('button', null, 'Not ekle');
     not.onclick = () => { if (!metin.value.trim()) return tost('Not boş olamaz.'); SES.tik(); projeIslem({ islem:'not', id:p.id, metin:metin.value.trim() }, 'Not eklendi; CEO sonraki toplantıda okur.'); };
     const kapat = el('button', 'sil', 'Kapat');
-    kapat.onclick = () => { if (confirm(`“${p.baslik}” kapatılsın mı? Toplantılara artık girmez.`)) projeIslem({ islem:'kapat', id:p.id }, 'Proje kapandı.'); };
+    kapat.onclick = () => { if (confirm(`"${p.baslik}" kapatılsın mı? Toplantılara artık girmez.`)) projeIslem({ islem:'kapat', id:p.id }, 'Proje kapandı.'); };
     islem.append(not, kapat);
   }
   k.append(metin, islem);
   return k;
+}
+
+function notPopup(n) {
+  const katman = el('div', 'katman');
+  const kart = el('div', 'kart-k cam');
+  kart.style.maxWidth = '520px';
+  kart.style.width = '90vw';
+  
+  const baslik = el('div', 'marka-k');
+  baslik.style.display = 'flex';
+  baslik.style.justifyContent = 'space-between';
+  baslik.style.alignItems = 'center';
+  baslik.style.marginBottom = '16px';
+  
+  const kaynakBadge = el('span', 'durum-rozet', n.kaynak === 'ceo' ? 'CEO Notu' : 'Kullanıcı Notu');
+  kaynakBadge.style.background = n.kaynak === 'ceo' ? 'rgba(255,122,89,.14)' : 'rgba(59,52,44,.07)';
+  kaynakBadge.style.color = n.kaynak === 'ceo' ? 'var(--mercan-k)' : '#6d6357';
+  
+  baslik.append(el('h3', null, 'Toplantı / Not Detayı'), kaynakBadge);
+  
+  const icerik = el('div');
+  icerik.style.whiteSpace = 'pre-wrap';
+  icerik.style.fontSize = '14px';
+  icerik.style.lineHeight = '1.6';
+  icerik.style.color = '#3f382f';
+  icerik.textContent = n.metin;
+  
+  const zaman = el('div', 'alt');
+  zaman.style.marginTop = '16px';
+  zaman.style.fontSize = '12px';
+  zaman.style.color = 'var(--soluk)';
+  zaman.textContent = String(n.zaman || '').replace('T', ' ').slice(0, 19);
+  
+  const kapatBtn = el('button', 'dugme', 'Kapat');
+  kapatBtn.style.marginTop = '16px';
+  kapatBtn.onclick = () => { katman.remove(); };
+  
+  kart.append(baslik, icerik, zaman, kapatBtn);
+  katman.append(kart);
+  document.body.append(katman);
+  
+  // ESC ile kapat
+  const esc = (e) => { if (e.key === 'Escape') { katman.remove(); removeEventListener('keydown', esc); } };
+  addEventListener('keydown', esc);
+  katman.onclick = (e) => { if (e.target === katman) { katman.remove(); removeEventListener('keydown', esc); } };
 }
 async function projelerSayfasi() {
   const baslik = el('h2', null, 'Projeler');
@@ -3097,6 +3190,12 @@ function ajanAnimasyon(a, t, dt) {
   let kd = uyku ? 'uyuyor' : a.durum === 'bitti' || a.durum === 'dusunuyor' ? a.durum : 'calisiyor';
   if (a.yol) kd = 'dinleniyor';                          // zıplarken uyanık
   else if (a.yerHedef?.durum) kd = a.yerHedef.durum;     // eğlence odası: oynuyor/dinleniyor; yatak: uyuyor
+  
+  // Debug: log meeting cats
+  if (a.yerAnahtar?.startsWith('tp:')) {
+    console.log('[DEBUG] Meeting cat', a.id, 'kd:', kd, 'yerAnahtar:', a.yerAnahtar, 'yerHedef.durum:', a.yerHedef?.durum);
+  }
+  
   a.kedi.setDurum(kd);
   a.kedi.update(dt);
   if (a.yatakYeri) a.yatakYeri.ortu.visible = a.yerAnahtar === 'yatak' && !a.yol && kd === 'uyuyor';
